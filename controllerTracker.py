@@ -94,7 +94,7 @@ class JoystickPoller:
 
 	def _poll(self):
 		calibration_count = 0
-		max_calibration = 100
+		max_calibration = 20
 		
 		while self.running:
 			try:
@@ -114,12 +114,12 @@ class JoystickPoller:
 						raw_y = self.axis_states.get(self.right_stick_y_axis, 0.0)
 						
 						self.current_x = clamp(raw_x, -1.0, 1.0)
-						self.current_y = clamp(raw_y, -1.0, 1.0)
+						self.current_y = clamp(-raw_y, -1.0, 1.0)
 						
 						self._check_and_save()
 			except Exception as e:
-				time.sleep(0.01)
-				continue
+				pass
+			time.sleep(0.001)
 
 	def _detect_right_stick(self):
 		right_stick_candidates = {
