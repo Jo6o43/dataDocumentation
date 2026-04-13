@@ -86,6 +86,7 @@ class JoystickPoller:
 
 	def _poll(self):
 		while self.running:
+			pygame.event.pump()
 			raw_x = self.joystick.get_axis(self.axis_x)
 			raw_y = self.joystick.get_axis(self.axis_y)
 			x = apply_deadzone(raw_x, DEADZONE)
