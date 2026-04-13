@@ -1,5 +1,7 @@
 import sys
 import json
+import threading
+import time
 from pathlib import Path
 from datetime import datetime
 import pygame
@@ -66,6 +68,72 @@ def get_unique_output_path(output_dir, base_filename):
 		index += 1
 
 
+class JoystickPoller:
+	def __init__(self, joystick, axis_x, axis_y, output_path):
+		self.joystick = joystick
+		self.axis_x = axis_x
+		self.axis_y = axis_y
+		self.output_path = output_path
+		self.running = True
+		self.current_x = 0.0
+		self.current_y = 0.0
+		self.previous_rounded = None
+		self.output_rows = []
+		self.history_points = []
+		self.lock = threading.Lock()
+		self.thread = threading.Thread(target=self._poll, daemon=True)
+		self.thread.start()
+
+	def _poll(self):
+		while self.running:
+			raw_x = self.joystick.get_axis(self.axis_x)
+			raw_y = self.joystick.get_axis(self.axis_y)
+			x = apply_deadzone(raw_x, DEADZONE)
+			y = apply_deadzone(raw_y, DEADZONE)
+
+			with self.lock:
+				self.current_x = x
+				self.current_y = y
+
+				rounded_pair = (round(x, 3), round(y, 3))
+				if rounded_pair != self.previous_rounded:
+					timestamp = datetime.now().isoformat(timespec="milliseconds")
+					output_entry = {
+						"timestamp": timestamp,
+						"axis_x": self.axis_x,
+						"axis_y": self.axis_y,
+						"x": rounded_pair[0],
+						"y": rounded_pair[1],
+					}
+					self.output_rows.append(output_entry)
+					self._save_json()
+
+					self.history_points.append((rounded_pair[0], rounded_pair[1]))
+					if len(self.history_points) > HISTORY_DOT_COUNT:
+						self.history_points = self.history_points[-HISTORY_DOT_COUNT:]
+
+					print(f"Right Stick -> X: {rounded_pair[0]: .3f} | Y: {rounded_pair[1]: .3f}")
+					self.previous_rounded = rounded_pair
+
+			time.sleep(0.01)
+
+	def _save_json(self):
+		with open(self.output_path, "w", encoding="utf-8") as json_file:
+			json.dump(self.output_rows, json_file, indent=2)
+
+	def get_state(self):
+		with self.lock:
+			return (
+				self.current_x,
+				self.current_y,
+				list(self.history_points),
+			)
+
+	def stop(self):
+		self.running = False
+		self.thread.join(timeout=1.0)
+
+
 def main():
 	pygame.init()
 	pygame.joystick.init()
@@ -114,12 +182,11 @@ def main():
 	print(f"Controller: {joystick_name}")
 	print(f"Tracking right stick axes: X={axis_x}, Y={axis_y}")
 
-	previous_print = None
-	output_rows = []
-	history_points = []
 	output_path = get_unique_output_path(OUTPUT_DIR, OUTPUT_FILE)
-	save_outputs_to_json(output_path, output_rows)
 	print(f"Saving outputs to {output_path}")
+	
+	poller = JoystickPoller(joystick, axis_x, axis_y, output_path)
+	
 	running = True
 	while running:
 		pygame.event.pump()
@@ -129,30 +196,7 @@ def main():
 			elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
 				running = False
 
-		raw_x = joystick.get_axis(axis_x)
-		raw_y = joystick.get_axis(axis_y)
-		x = apply_deadzone(raw_x, DEADZONE)
-		y = apply_deadzone(raw_y, DEADZONE)
-
-		rounded_pair = (round(x, 3), round(y, 3))
-		if rounded_pair != previous_print:
-			timestamp = datetime.now().isoformat(timespec="milliseconds")
-			output_entry = {
-				"timestamp": timestamp,
-				"axis_x": axis_x,
-				"axis_y": axis_y,
-				"x": rounded_pair[0],
-				"y": rounded_pair[1],
-			}
-			output_rows.append(output_entry)
-			save_outputs_to_json(output_path, output_rows)
-
-			history_points.append((rounded_pair[0], rounded_pair[1]))
-			if len(history_points) > HISTORY_DOT_COUNT:
-				history_points = history_points[-HISTORY_DOT_COUNT:]
-
-			print(f"Right Stick -> X: {rounded_pair[0]: .3f} | Y: {rounded_pair[1]: .3f}")
-			previous_print = rounded_pair
+		x, y, history_points = poller.get_state()
 
 		screen.fill((16, 18, 24))
 
@@ -187,6 +231,7 @@ def main():
 		pygame.display.flip()
 		clock.tick(FPS)
 
+	poller.stop()
 	pygame.quit()
 	sys.exit(0)
 
