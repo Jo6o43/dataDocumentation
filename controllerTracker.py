@@ -6,6 +6,11 @@ from pathlib import Path
 from datetime import datetime
 import pygame
 
+try:
+	import inputs
+except ImportError:
+	inputs = None
+
 
 WINDOW_WIDTH = 700
 WINDOW_HEIGHT = 520
@@ -69,10 +74,7 @@ def get_unique_output_path(output_dir, base_filename):
 
 
 class JoystickPoller:
-	def __init__(self, joystick, axis_x, axis_y, output_path):
-		self.joystick = joystick
-		self.axis_x = axis_x
-		self.axis_y = axis_y
+	def __init__(self, output_path):
 		self.output_path = output_path
 		self.running = True
 		self.current_x = 0.0
@@ -86,37 +88,42 @@ class JoystickPoller:
 
 	def _poll(self):
 		while self.running:
-			pygame.event.pump()
-			raw_x = self.joystick.get_axis(self.axis_x)
-			raw_y = self.joystick.get_axis(self.axis_y)
-			x = apply_deadzone(raw_x, DEADZONE)
-			y = apply_deadzone(raw_y, DEADZONE)
+			try:
+				events = inputs.get_gamepad()
+				for event in events:
+					if event.ev_type == 'Absolute' and event.state is not None:
+						with self.lock:
+							if 'ABS_RX' in event.code or 'ABS_X' in event.code:
+								self.current_x = event.state / 32768.0
+							elif 'ABS_RY' in event.code or 'ABS_Y' in event.code:
+								self.current_y = event.state / 32768.0
+							
+							self._check_and_save()
+			except:
+				time.sleep(0.01)
+				continue
 
-			with self.lock:
-				self.current_x = x
-				self.current_y = y
+	def _check_and_save(self):
+		x = apply_deadzone(self.current_x, DEADZONE)
+		y = apply_deadzone(self.current_y, DEADZONE)
+		
+		rounded_pair = (round(x, 3), round(y, 3))
+		if rounded_pair != self.previous_rounded:
+			timestamp = datetime.now().isoformat(timespec="milliseconds")
+			output_entry = {
+				"timestamp": timestamp,
+				"x": rounded_pair[0],
+				"y": rounded_pair[1],
+			}
+			self.output_rows.append(output_entry)
+			self._save_json()
 
-				rounded_pair = (round(x, 3), round(y, 3))
-				if rounded_pair != self.previous_rounded:
-					timestamp = datetime.now().isoformat(timespec="milliseconds")
-					output_entry = {
-						"timestamp": timestamp,
-						"axis_x": self.axis_x,
-						"axis_y": self.axis_y,
-						"x": rounded_pair[0],
-						"y": rounded_pair[1],
-					}
-					self.output_rows.append(output_entry)
-					self._save_json()
+			self.history_points.append((rounded_pair[0], rounded_pair[1]))
+			if len(self.history_points) > HISTORY_DOT_COUNT:
+				self.history_points = self.history_points[-HISTORY_DOT_COUNT:]
 
-					self.history_points.append((rounded_pair[0], rounded_pair[1]))
-					if len(self.history_points) > HISTORY_DOT_COUNT:
-						self.history_points = self.history_points[-HISTORY_DOT_COUNT:]
-
-					print(f"Right Stick -> X: {rounded_pair[0]: .3f} | Y: {rounded_pair[1]: .3f}")
-					self.previous_rounded = rounded_pair
-
-			time.sleep(0.01)
+			print(f"Right Stick -> X: {rounded_pair[0]: .3f} | Y: {rounded_pair[1]: .3f}")
+			self.previous_rounded = rounded_pair
 
 	def _save_json(self):
 		with open(self.output_path, "w", encoding="utf-8") as json_file:
@@ -125,8 +132,8 @@ class JoystickPoller:
 	def get_state(self):
 		with self.lock:
 			return (
-				self.current_x,
-				self.current_y,
+				apply_deadzone(self.current_x, DEADZONE),
+				apply_deadzone(self.current_y, DEADZONE),
 				list(self.history_points),
 			)
 
@@ -136,9 +143,12 @@ class JoystickPoller:
 
 
 def main():
+	if inputs is None:
+		print("ERROR: 'inputs' library not installed.")
+		print("Run: pip install inputs")
+		sys.exit(1)
+
 	pygame.init()
-	pygame.joystick.init()
-	pygame.event.set_allowed([pygame.QUIT, pygame.KEYDOWN])
 
 	screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
 	pygame.display.set_caption("Controller Right Stick Tracker")
@@ -149,44 +159,12 @@ def main():
 	font_body = pygame.font.SysFont("consolas", 22)
 	font_small = pygame.font.SysFont("consolas", 18)
 
-	if pygame.joystick.get_count() == 0:
-		print("No controller detected. Connect one and restart.")
-		running = True
-		while running:
-			for event in pygame.event.get():
-				if event.type == pygame.QUIT:
-					running = False
-				elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-					running = False
-
-			screen.fill((20, 20, 24))
-			draw_centered_text(screen, "No Controller Detected", font_title, (230, 230, 230), 170)
-			draw_centered_text(screen, "Connect a gamepad and restart", font_body, (190, 190, 190), 220)
-			draw_centered_text(screen, "Press ESC to quit", font_small, (160, 160, 160), 270)
-			pygame.display.flip()
-			clock.tick(FPS)
-
-		pygame.quit()
-		sys.exit(0)
-
-	joystick = pygame.joystick.Joystick(0)
-	joystick.init()
-	joystick_name = joystick.get_name()
-
-	axis_pair = pick_right_stick_axes(joystick)
-	if axis_pair is None:
-		print("Controller has no readable axes.")
-		pygame.quit()
-		sys.exit(1)
-
-	axis_x, axis_y = axis_pair
-	print(f"Controller: {joystick_name}")
-	print(f"Tracking right stick axes: X={axis_x}, Y={axis_y}")
-
+	print("Initializing input listener (works in background even when unfocused)...")
 	output_path = get_unique_output_path(OUTPUT_DIR, OUTPUT_FILE)
 	print(f"Saving outputs to {output_path}")
 	
-	poller = JoystickPoller(joystick, axis_x, axis_y, output_path)
+	poller = JoystickPoller(output_path)
+	time.sleep(0.5)
 	
 	running = True
 	while running:
@@ -202,8 +180,8 @@ def main():
 		screen.fill((16, 18, 24))
 
 		draw_centered_text(screen, "Right Stick Input", font_title, (235, 235, 235), 40)
-		draw_centered_text(screen, f"Controller: {joystick_name}", font_small, (185, 200, 220), 78)
-		draw_centered_text(screen, f"Axes: X={axis_x}  Y={axis_y}", font_small, (160, 180, 200), 102)
+		draw_centered_text(screen, "Controller Tracking (Background)", font_small, (185, 200, 220), 78)
+		draw_centered_text(screen, "Works while playing other games", font_small, (160, 180, 200), 102)
 		draw_centered_text(screen, f"X: {x: .3f}", font_body, (230, 200, 120), 145)
 		draw_centered_text(screen, f"Y: {y: .3f}", font_body, (150, 210, 255), 178)
 		draw_centered_text(screen, "Press ESC to quit", font_small, (150, 150, 150), 495)
