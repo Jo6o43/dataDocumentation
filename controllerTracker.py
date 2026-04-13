@@ -1,11 +1,17 @@
 import sys
+import json
+from pathlib import Path
+from datetime import datetime
 import pygame
 
 
 WINDOW_WIDTH = 700
-WINDOW_HEIGHT = 420
+WINDOW_HEIGHT = 520
 FPS = 60
 DEADZONE = 0.08
+OUTPUT_FILE = "right_stick_outputs.json"
+HISTORY_DOT_COUNT = 40
+OUTPUT_DIR = Path("controllerTracker_outputs")
 
 
 def clamp(value, min_value, max_value):
@@ -37,6 +43,27 @@ def draw_centered_text(surface, text, font, color, y):
 	rendered = font.render(text, True, color)
 	rect = rendered.get_rect(center=(WINDOW_WIDTH // 2, y))
 	surface.blit(rendered, rect)
+
+
+def save_outputs_to_json(path, output_rows):
+	with open(path, "w", encoding="utf-8") as json_file:
+		json.dump(output_rows, json_file, indent=2)
+
+
+def get_unique_output_path(output_dir, base_filename):
+	output_dir.mkdir(parents=True, exist_ok=True)
+	base_path = output_dir / base_filename
+	if not base_path.exists():
+		return base_path
+
+	stem = base_path.stem
+	suffix = base_path.suffix
+	index = 1
+	while True:
+		candidate = output_dir / f"{stem}_{index}{suffix}"
+		if not candidate.exists():
+			return candidate
+		index += 1
 
 
 def main():
@@ -86,6 +113,11 @@ def main():
 	print(f"Tracking right stick axes: X={axis_x}, Y={axis_y}")
 
 	previous_print = None
+	output_rows = []
+	history_points = []
+	output_path = get_unique_output_path(OUTPUT_DIR, OUTPUT_FILE)
+	save_outputs_to_json(output_path, output_rows)
+	print(f"Saving outputs to {output_path}")
 	running = True
 	while running:
 		for event in pygame.event.get():
@@ -101,6 +133,21 @@ def main():
 
 		rounded_pair = (round(x, 3), round(y, 3))
 		if rounded_pair != previous_print:
+			timestamp = datetime.now().isoformat(timespec="milliseconds")
+			output_entry = {
+				"timestamp": timestamp,
+				"axis_x": axis_x,
+				"axis_y": axis_y,
+				"x": rounded_pair[0],
+				"y": rounded_pair[1],
+			}
+			output_rows.append(output_entry)
+			save_outputs_to_json(output_path, output_rows)
+
+			history_points.append((rounded_pair[0], rounded_pair[1]))
+			if len(history_points) > HISTORY_DOT_COUNT:
+				history_points = history_points[-HISTORY_DOT_COUNT:]
+
 			print(f"Right Stick -> X: {rounded_pair[0]: .3f} | Y: {rounded_pair[1]: .3f}")
 			previous_print = rounded_pair
 
@@ -111,20 +158,27 @@ def main():
 		draw_centered_text(screen, f"Axes: X={axis_x}  Y={axis_y}", font_small, (160, 180, 200), 102)
 		draw_centered_text(screen, f"X: {x: .3f}", font_body, (230, 200, 120), 145)
 		draw_centered_text(screen, f"Y: {y: .3f}", font_body, (150, 210, 255), 178)
-		draw_centered_text(screen, "Press ESC to quit", font_small, (150, 150, 150), 395)
+		draw_centered_text(screen, "Press ESC to quit", font_small, (150, 150, 150), 495)
 
-		box_size = 220
-		box_x = WINDOW_WIDTH // 2 - box_size // 2
-		box_y = 200
-		pygame.draw.rect(screen, (90, 100, 120), (box_x, box_y, box_size, box_size), width=2)
+		circle_size = 300
+		circle_x = WINDOW_WIDTH // 2 - circle_size // 2
+		circle_y = 200
+		center_x = circle_x + circle_size // 2
+		center_y = circle_y + circle_size // 2
+		radius = circle_size // 2
+		inner_radius = radius - 8
 
-		center_x = box_x + box_size // 2
-		center_y = box_y + box_size // 2
-		pygame.draw.line(screen, (60, 70, 85), (center_x, box_y), (center_x, box_y + box_size), width=1)
-		pygame.draw.line(screen, (60, 70, 85), (box_x, center_y), (box_x + box_size, center_y), width=1)
+		pygame.draw.circle(screen, (90, 100, 120), (center_x, center_y), radius, width=2)
+		pygame.draw.line(screen, (60, 70, 85), (center_x - radius, center_y), (center_x + radius, center_y), width=1)
+		pygame.draw.line(screen, (60, 70, 85), (center_x, center_y - radius), (center_x, center_y + radius), width=1)
 
-		dot_x = int(center_x + clamp(x, -1.0, 1.0) * (box_size // 2 - 8))
-		dot_y = int(center_y + clamp(y, -1.0, 1.0) * (box_size // 2 - 8))
+		for point_x, point_y in history_points[:-1]:
+			history_dot_x = int(center_x + clamp(point_x, -1.0, 1.0) * inner_radius)
+			history_dot_y = int(center_y + clamp(point_y, -1.0, 1.0) * inner_radius)
+			pygame.draw.circle(screen, (220, 70, 70), (history_dot_x, history_dot_y), 4)
+
+		dot_x = int(center_x + clamp(x, -1.0, 1.0) * inner_radius)
+		dot_y = int(center_y + clamp(y, -1.0, 1.0) * inner_radius)
 		pygame.draw.circle(screen, (255, 180, 100), (dot_x, dot_y), 8)
 
 		pygame.display.flip()
