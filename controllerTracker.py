@@ -69,9 +69,11 @@ def get_unique_output_path(output_dir, base_filename):
 def main():
 	pygame.init()
 	pygame.joystick.init()
+	pygame.event.set_allowed([pygame.QUIT, pygame.KEYDOWN])
 
 	screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
 	pygame.display.set_caption("Controller Right Stick Tracker")
+	screen.set_alpha(255)
 	clock = pygame.time.Clock()
 
 	font_title = pygame.font.SysFont("consolas", 28, bold=True)
@@ -120,6 +122,7 @@ def main():
 	print(f"Saving outputs to {output_path}")
 	running = True
 	while running:
+		pygame.event.pump()
 		for event in pygame.event.get():
 			if event.type == pygame.QUIT:
 				running = False
