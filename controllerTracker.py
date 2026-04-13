@@ -2,6 +2,7 @@ import sys
 import json
 import threading
 import time
+import ctypes
 from pathlib import Path
 from datetime import datetime
 import pygame
@@ -19,10 +20,41 @@ DEADZONE = 0.15
 OUTPUT_FILE = "right_stick_outputs.json"
 HISTORY_DOT_COUNT = 40
 OUTPUT_DIR = Path("controllerTracker_outputs")
-PRIMARY_RIGHT_X_AXIS = "ABS_RX"
-PRIMARY_RIGHT_Y_AXIS = "ABS_RY"
-FALLBACK_RIGHT_X_AXIS = "ABS_Z"
-FALLBACK_RIGHT_Y_AXIS = "ABS_RZ"
+POLL_INTERVAL_SECONDS = 0.001
+
+
+class XINPUT_GAMEPAD(ctypes.Structure):
+	_fields_ = [
+		("wButtons", ctypes.c_ushort),
+		("bLeftTrigger", ctypes.c_ubyte),
+		("bRightTrigger", ctypes.c_ubyte),
+		("sThumbLX", ctypes.c_short),
+		("sThumbLY", ctypes.c_short),
+		("sThumbRX", ctypes.c_short),
+		("sThumbRY", ctypes.c_short),
+	]
+
+
+class XINPUT_STATE(ctypes.Structure):
+	_fields_ = [
+		("dwPacketNumber", ctypes.c_ulong),
+		("Gamepad", XINPUT_GAMEPAD),
+	]
+
+
+def load_xinput_library():
+	for dll_name in ["xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"]:
+		try:
+			return ctypes.WinDLL(dll_name)
+		except OSError:
+			continue
+	return None
+
+
+def normalize_stick_axis(raw_value):
+	if raw_value >= 0:
+		return raw_value / 32767.0
+	return raw_value / 32768.0
 
 
 def clamp(value, min_value, max_value):
@@ -34,21 +66,6 @@ def apply_deadzone(value, deadzone):
 		return 0.0
 	sign = 1.0 if value >= 0 else -1.0
 	return sign * ((abs(value) - deadzone) / (1.0 - deadzone))
-
-
-def pick_right_stick_axes(joystick):
-	"""Pick a likely right-stick axis pair for common controller layouts."""
-	axis_count = joystick.get_numaxes()
-	common_pairs = [(2, 3), (3, 4)]
-	for pair in common_pairs:
-		if pair[0] < axis_count and pair[1] < axis_count:
-			return pair
-
-	if axis_count >= 4:
-		return 2, 3
-	if axis_count >= 2:
-		return 0, 1
-	return None
 
 
 def draw_centered_text(surface, text, font, color, y):
@@ -88,15 +105,15 @@ class JoystickPoller:
 		self.output_rows = []
 		self.history_points = []
 		self.lock = threading.Lock()
-		
-		self.axis_states = {
-			PRIMARY_RIGHT_X_AXIS: 0.0,
-			PRIMARY_RIGHT_Y_AXIS: 0.0,
-			FALLBACK_RIGHT_X_AXIS: 0.0,
-			FALLBACK_RIGHT_Y_AXIS: 0.0,
-		}
-		self.right_stick_x_axis = PRIMARY_RIGHT_X_AXIS
-		self.right_stick_y_axis = PRIMARY_RIGHT_Y_AXIS
+
+		self.backend_name = "inputs"
+		self.xinput_dll = load_xinput_library()
+		if self.xinput_dll is not None:
+			self.backend_name = "xinput"
+			self.xinput_state = XINPUT_STATE()
+			self.xinput_get_state = self.xinput_dll.XInputGetState
+			self.xinput_get_state.argtypes = [ctypes.c_uint, ctypes.POINTER(XINPUT_STATE)]
+			self.xinput_get_state.restype = ctypes.c_uint
 		
 		self.thread = threading.Thread(target=self._poll, daemon=True)
 		self.thread.start()
@@ -104,32 +121,53 @@ class JoystickPoller:
 	def _poll(self):
 		while self.running:
 			try:
-				events = inputs.get_gamepad()
-				for event in events:
-					if event.ev_type == 'Absolute' and event.state is not None:
-						self.axis_states[event.code] = event.state / 32768.0
-
-				self._select_axis_pair()
-				
-				with self.lock:
-					raw_x = self.axis_states.get(self.right_stick_x_axis, 0.0)
-					raw_y = self.axis_states.get(self.right_stick_y_axis, 0.0)
-
-					self.current_x = clamp(raw_x, -1.0, 1.0)
-					self.current_y = clamp(-raw_y, -1.0, 1.0)
-
-					self._check_and_save()
+				if self.backend_name == "xinput":
+					self._poll_xinput()
+				else:
+					self._poll_inputs()
 			except Exception:
 				pass
-			time.sleep(0.001)
+			time.sleep(POLL_INTERVAL_SECONDS)
 
-	def _select_axis_pair(self):
-		if PRIMARY_RIGHT_X_AXIS in self.axis_states and PRIMARY_RIGHT_Y_AXIS in self.axis_states:
-			self.right_stick_x_axis = PRIMARY_RIGHT_X_AXIS
-			self.right_stick_y_axis = PRIMARY_RIGHT_Y_AXIS
-		elif FALLBACK_RIGHT_X_AXIS in self.axis_states and FALLBACK_RIGHT_Y_AXIS in self.axis_states:
-			self.right_stick_x_axis = FALLBACK_RIGHT_X_AXIS
-			self.right_stick_y_axis = FALLBACK_RIGHT_Y_AXIS
+	def _poll_xinput(self):
+		# Read from the first connected XInput controller.
+		for user_index in range(4):
+			result = self.xinput_get_state(user_index, ctypes.byref(self.xinput_state))
+			if result == 0:
+				raw_x = normalize_stick_axis(self.xinput_state.Gamepad.sThumbRX)
+				raw_y = normalize_stick_axis(self.xinput_state.Gamepad.sThumbRY)
+				with self.lock:
+					self.current_x = clamp(raw_x, -1.0, 1.0)
+					self.current_y = clamp(raw_y, -1.0, 1.0)
+					self._check_and_save()
+				return
+
+		with self.lock:
+			self.current_x = 0.0
+			self.current_y = 0.0
+
+	def _poll_inputs(self):
+		if inputs is None:
+			return
+
+		events = inputs.get_gamepad()
+		raw_x = None
+		raw_y = None
+
+		for event in events:
+			if event.ev_type != "Absolute" or event.state is None:
+				continue
+			if event.code == "ABS_RX":
+				raw_x = event.state / 32768.0
+			elif event.code == "ABS_RY":
+				raw_y = -event.state / 32768.0
+
+		with self.lock:
+			if raw_x is not None:
+				self.current_x = clamp(raw_x, -1.0, 1.0)
+			if raw_y is not None:
+				self.current_y = clamp(raw_y, -1.0, 1.0)
+			self._check_and_save()
 
 	def _check_and_save(self):
 		x = apply_deadzone(self.current_x, DEADZONE)
@@ -171,11 +209,6 @@ class JoystickPoller:
 
 
 def main():
-	if inputs is None:
-		print("ERROR: 'inputs' library not installed.")
-		print("Run: pip install inputs")
-		sys.exit(1)
-
 	pygame.init()
 
 	screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -187,11 +220,20 @@ def main():
 	font_body = pygame.font.SysFont("consolas", 22)
 	font_small = pygame.font.SysFont("consolas", 18)
 
-	print("Initializing input listener (works in background even when unfocused)...")
+	print("Initializing low-latency input listener...")
 	output_path = get_unique_output_path(OUTPUT_DIR, OUTPUT_FILE)
 	print(f"Saving outputs to {output_path}")
 	
 	poller = JoystickPoller(output_path)
+	print(f"Input backend: {poller.backend_name}")
+	if poller.backend_name == "inputs":
+		if inputs is None:
+			print("No controller backend available.")
+			print("Install 'inputs' or use an XInput-compatible controller.")
+			poller.stop()
+			pygame.quit()
+			sys.exit(1)
+		print("Fallback backend in use. For lowest latency, use an XInput controller.")
 	time.sleep(0.5)
 	
 	running = True
