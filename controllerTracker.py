@@ -19,6 +19,10 @@ DEADZONE = 0.15
 OUTPUT_FILE = "right_stick_outputs.json"
 HISTORY_DOT_COUNT = 40
 OUTPUT_DIR = Path("controllerTracker_outputs")
+PRIMARY_RIGHT_X_AXIS = "ABS_RX"
+PRIMARY_RIGHT_Y_AXIS = "ABS_RY"
+FALLBACK_RIGHT_X_AXIS = "ABS_Z"
+FALLBACK_RIGHT_Y_AXIS = "ABS_RZ"
 
 
 def clamp(value, min_value, max_value):
@@ -85,55 +89,47 @@ class JoystickPoller:
 		self.history_points = []
 		self.lock = threading.Lock()
 		
-		self.axis_states = {}
-		self.right_stick_x_axis = None
-		self.right_stick_y_axis = None
+		self.axis_states = {
+			PRIMARY_RIGHT_X_AXIS: 0.0,
+			PRIMARY_RIGHT_Y_AXIS: 0.0,
+			FALLBACK_RIGHT_X_AXIS: 0.0,
+			FALLBACK_RIGHT_Y_AXIS: 0.0,
+		}
+		self.right_stick_x_axis = PRIMARY_RIGHT_X_AXIS
+		self.right_stick_y_axis = PRIMARY_RIGHT_Y_AXIS
 		
 		self.thread = threading.Thread(target=self._poll, daemon=True)
 		self.thread.start()
 
 	def _poll(self):
-		calibration_count = 0
-		max_calibration = 20
-		
 		while self.running:
 			try:
 				events = inputs.get_gamepad()
 				for event in events:
 					if event.ev_type == 'Absolute' and event.state is not None:
 						self.axis_states[event.code] = event.state / 32768.0
-				
-				if calibration_count < max_calibration:
-					calibration_count += 1
-					if self.right_stick_x_axis is None:
-						self._detect_right_stick()
+
+				self._select_axis_pair()
 				
 				with self.lock:
-					if self.right_stick_x_axis and self.right_stick_y_axis:
-						raw_x = self.axis_states.get(self.right_stick_x_axis, 0.0)
-						raw_y = self.axis_states.get(self.right_stick_y_axis, 0.0)
-						
-						self.current_x = clamp(raw_x, -1.0, 1.0)
-						self.current_y = clamp(-raw_y, -1.0, 1.0)
-						
-						self._check_and_save()
-			except Exception as e:
+					raw_x = self.axis_states.get(self.right_stick_x_axis, 0.0)
+					raw_y = self.axis_states.get(self.right_stick_y_axis, 0.0)
+
+					self.current_x = clamp(raw_x, -1.0, 1.0)
+					self.current_y = clamp(-raw_y, -1.0, 1.0)
+
+					self._check_and_save()
+			except Exception:
 				pass
 			time.sleep(0.001)
 
-	def _detect_right_stick(self):
-		right_stick_candidates = {
-			'ABS_RX': 'ABS_RY',
-			'ABS_Z': 'ABS_RZ',
-		}
-		
-		for x_axis, y_axis in right_stick_candidates.items():
-			if x_axis in self.axis_states and y_axis in self.axis_states:
-				if abs(self.axis_states[x_axis]) > 0.1 or abs(self.axis_states[y_axis]) > 0.1:
-					self.right_stick_x_axis = x_axis
-					self.right_stick_y_axis = y_axis
-					print(f"Detected right stick: X={x_axis}, Y={y_axis}")
-					return
+	def _select_axis_pair(self):
+		if PRIMARY_RIGHT_X_AXIS in self.axis_states and PRIMARY_RIGHT_Y_AXIS in self.axis_states:
+			self.right_stick_x_axis = PRIMARY_RIGHT_X_AXIS
+			self.right_stick_y_axis = PRIMARY_RIGHT_Y_AXIS
+		elif FALLBACK_RIGHT_X_AXIS in self.axis_states and FALLBACK_RIGHT_Y_AXIS in self.axis_states:
+			self.right_stick_x_axis = FALLBACK_RIGHT_X_AXIS
+			self.right_stick_y_axis = FALLBACK_RIGHT_Y_AXIS
 
 	def _check_and_save(self):
 		x = apply_deadzone(self.current_x, DEADZONE)
